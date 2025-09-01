@@ -353,46 +353,210 @@ async def ping(request):
 
 async def serve_agent_html(request):
     """Serve the agent HTML page."""
-    html_content = """<!DOCTYPE html>
+    # Get WebSocket URL from query parameter
+    wss_url = request.query.get('wss', '')
+    
+    html_content = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI Agent</title>
+    <title>AI Voice Agent</title>
     <style>
-        body {
+        body {{
             margin: 0;
             padding: 0;
             width: 100vw;
             height: 100vh;
-            overflow: hidden;
-        }
-        iframe {
-            width: 100%;
-            height: 100%;
-            border: none;
-        }
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            color: white;
+        }}
+        .container {{
+            text-align: center;
+            padding: 20px;
+        }}
+        h1 {{
+            font-size: 48px;
+            margin-bottom: 10px;
+        }}
+        .status {{
+            font-size: 24px;
+            margin: 20px 0;
+        }}
+        .listening {{
+            animation: pulse 2s infinite;
+        }}
+        @keyframes pulse {{
+            0% {{ opacity: 1; }}
+            50% {{ opacity: 0.5; }}
+            100% {{ opacity: 1; }}
+        }}
+        #error {{
+            background: rgba(255, 0, 0, 0.2);
+            padding: 10px;
+            border-radius: 5px;
+            margin-top: 20px;
+            display: none;
+        }}
     </style>
 </head>
 <body>
-    <iframe id="agent-frame"></iframe>
+    <div class="container">
+        <h1>🎤 AI Voice Agent</h1>
+        <div class="status">
+            <div id="status-text">Connecting to OpenAI...</div>
+        </div>
+        <div id="error"></div>
+    </div>
+
     <script>
-        // Get WebSocket URL from query parameter
-        const params = new URLSearchParams(window.location.search);
-        const wssUrl = params.get('wss');
-        
-        if (wssUrl) {
-            // Point to the hosted client with WebSocket URL
-            const clientUrl = `https://voice-agent-client.vercel.app/?wss=${encodeURIComponent(wssUrl)}`;
-            document.getElementById('agent-frame').src = clientUrl;
-        } else {
-            document.body.innerHTML = '<h1>Error: No WebSocket URL provided</h1>';
-        }
+        const wssUrl = '{wss_url}';
+        let ws = null;
+        let mediaStream = null;
+        let audioContext = null;
+        let audioQueue = [];
+        let isPlaying = false;
+
+        function updateStatus(text, isListening = false) {{
+            const statusDiv = document.getElementById('status-text');
+            statusDiv.textContent = text;
+            statusDiv.className = isListening ? 'listening' : '';
+        }}
+
+        function showError(message) {{
+            const errorDiv = document.getElementById('error');
+            errorDiv.textContent = 'Error: ' + message;
+            errorDiv.style.display = 'block';
+        }}
+
+        async function initializeAudio() {{
+            try {{
+                // Get microphone access
+                mediaStream = await navigator.mediaDevices.getUserMedia({{ audio: true }});
+                audioContext = new (window.AudioContext || window.webkitAudioContext)({{ sampleRate: 24000 }});
+                
+                // Set up audio processing
+                const source = audioContext.createMediaStreamSource(mediaStream);
+                const processor = audioContext.createScriptProcessor(4096, 1, 1);
+                
+                processor.onaudioprocess = (e) => {{
+                    if (ws && ws.readyState === WebSocket.OPEN) {{
+                        const inputData = e.inputBuffer.getChannelData(0);
+                        // Convert to 16-bit PCM
+                        const pcm16 = new Int16Array(inputData.length);
+                        for (let i = 0; i < inputData.length; i++) {{
+                            pcm16[i] = Math.max(-32768, Math.min(32767, inputData[i] * 32768));
+                        }}
+                        
+                        // Send audio to OpenAI
+                        ws.send(JSON.stringify({{
+                            type: 'input_audio_buffer.append',
+                            audio: btoa(String.fromCharCode(...new Uint8Array(pcm16.buffer)))
+                        }}));
+                    }}
+                }};
+                
+                source.connect(processor);
+                processor.connect(audioContext.destination);
+                
+                updateStatus('✅ Audio initialized', true);
+                return true;
+            }} catch (error) {{
+                showError('Failed to access microphone: ' + error.message);
+                return false;
+            }}
+        }}
+
+        async function connectWebSocket() {{
+            if (!wssUrl) {{
+                showError('No WebSocket URL provided');
+                return;
+            }}
+
+            try {{
+                updateStatus('Connecting to AI...');
+                ws = new WebSocket(wssUrl);
+                
+                ws.onopen = async () => {{
+                    console.log('Connected to WebSocket');
+                    updateStatus('Connected! Initializing audio...');
+                    await initializeAudio();
+                    updateStatus('🎤 Listening... Start talking!', true);
+                }};
+                
+                ws.onmessage = (event) => {{
+                    try {{
+                        const data = JSON.parse(event.data);
+                        console.log('Received:', data.type);
+                        
+                        if (data.type === 'response.audio.delta' && data.delta) {{
+                            // Handle audio response from OpenAI
+                            playAudioDelta(data.delta);
+                        }} else if (data.type === 'response.audio_transcript.done') {{
+                            console.log('AI said:', data.transcript);
+                        }} else if (data.type === 'conversation.item.input_audio_transcription.completed') {{
+                            console.log('You said:', data.transcript);
+                        }}
+                    }} catch (error) {{
+                        console.error('Error processing message:', error);
+                    }}
+                }};
+                
+                ws.onerror = (error) => {{
+                    console.error('WebSocket error:', error);
+                    showError('Connection error');
+                }};
+                
+                ws.onclose = () => {{
+                    console.log('WebSocket closed');
+                    updateStatus('Disconnected. Refreshing...');
+                    setTimeout(() => location.reload(), 3000);
+                }};
+            }} catch (error) {{
+                showError('Failed to connect: ' + error.message);
+            }}
+        }}
+
+        async function playAudioDelta(base64Audio) {{
+            try {{
+                // Decode base64 to PCM16
+                const binaryString = atob(base64Audio);
+                const bytes = new Uint8Array(binaryString.length);
+                for (let i = 0; i < binaryString.length; i++) {{
+                    bytes[i] = binaryString.charCodeAt(i);
+                }}
+                
+                // Convert to Float32 for Web Audio
+                const pcm16 = new Int16Array(bytes.buffer);
+                const float32 = new Float32Array(pcm16.length);
+                for (let i = 0; i < pcm16.length; i++) {{
+                    float32[i] = pcm16[i] / 32768;
+                }}
+                
+                // Create and play audio buffer
+                const audioBuffer = audioContext.createBuffer(1, float32.length, 24000);
+                audioBuffer.getChannelData(0).set(float32);
+                
+                const source = audioContext.createBufferSource();
+                source.buffer = audioBuffer;
+                source.connect(audioContext.destination);
+                source.start();
+            }} catch (error) {{
+                console.error('Error playing audio:', error);
+            }}
+        }}
+
+        // Start connection
+        connectWebSocket();
     </script>
 </body>
 </html>"""
     return web.Response(text=html_content, content_type='text/html')
-
 
 def create_app():
     """Create the aiohttp application."""

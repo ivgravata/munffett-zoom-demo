@@ -91,7 +91,7 @@ class RecallAPIClient:
     
     def __init__(self, api_key: str):
         self.api_key = api_key
-        self.base_url = "https://us-east-1.recall.ai/api/v1"
+        self.base_url = "https://us-west-2.recall.ai/api/v1"
         
     async def create_bot(self, meeting_url: str, bot_name: str = "AI Assistant", 
                         persona_key: str = "assistant") -> Dict[str, Any]:

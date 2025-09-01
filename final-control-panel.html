@@ -1,0 +1,510 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Munffett Zoom AI Agent Control Panel</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 15px;
+            padding: 40px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+        }
+        
+        h1 {
+            color: #333;
+            margin-bottom: 10px;
+            text-align: center;
+            font-size: 32px;
+        }
+        
+        .subtitle {
+            text-align: center;
+            color: #666;
+            margin-bottom: 30px;
+        }
+        
+        .connection-status {
+            text-align: center;
+            padding: 10px;
+            border-radius: 8px;
+            margin-bottom: 30px;
+            font-weight: 600;
+        }
+        
+        .status-connected {
+            background: #d4edda;
+            color: #155724;
+        }
+        
+        .status-disconnected {
+            background: #f8d7da;
+            color: #721c24;
+        }
+        
+        .section {
+            margin-bottom: 30px;
+            padding-bottom: 20px;
+            border-bottom: 1px solid #eee;
+        }
+        
+        .section:last-child {
+            border-bottom: none;
+        }
+        
+        h2 {
+            color: #555;
+            font-size: 20px;
+            margin-bottom: 15px;
+        }
+        
+        .input-group {
+            margin-bottom: 20px;
+        }
+        
+        label {
+            display: block;
+            margin-bottom: 5px;
+            color: #555;
+            font-weight: 600;
+        }
+        
+        input {
+            width: 100%;
+            padding: 10px;
+            border: 2px solid #ddd;
+            border-radius: 5px;
+            font-size: 16px;
+        }
+        
+        input:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+        
+        button {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 5px;
+            font-size: 16px;
+            cursor: pointer;
+            margin-right: 10px;
+            margin-bottom: 10px;
+            transition: opacity 0.3s;
+        }
+        
+        button:hover {
+            opacity: 0.9;
+        }
+        
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        
+        .persona-selector {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+        
+        .persona-card {
+            padding: 15px;
+            border: 2px solid #ddd;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+        
+        .persona-card:hover {
+            border-color: #667eea;
+            background: #f8f9ff;
+        }
+        
+        .persona-card.selected {
+            border-color: #667eea;
+            background: #f0f4ff;
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.2);
+        }
+        
+        .persona-title {
+            font-weight: bold;
+            color: #333;
+            margin-bottom: 5px;
+        }
+        
+        .persona-desc {
+            font-size: 13px;
+            color: #666;
+            line-height: 1.4;
+        }
+        
+        .response {
+            margin-top: 20px;
+            padding: 15px;
+            border-radius: 5px;
+            white-space: pre-wrap;
+            font-family: 'Courier New', monospace;
+            font-size: 14px;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        
+        .success {
+            background: #d4edda;
+            border: 1px solid #c3e6cb;
+            color: #155724;
+        }
+        
+        .error {
+            background: #f8d7da;
+            border: 1px solid #f5c6cb;
+            color: #721c24;
+        }
+        
+        .info {
+            background: #d1ecf1;
+            border: 1px solid #bee5eb;
+            color: #0c5460;
+        }
+        
+        .bot-list {
+            margin-top: 10px;
+        }
+        
+        .bot-item {
+            padding: 15px;
+            background: #f9f9f9;
+            border-radius: 8px;
+            margin-bottom: 10px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .bot-info {
+            flex: 1;
+        }
+        
+        .bot-id {
+            font-weight: bold;
+            color: #667eea;
+            font-family: monospace;
+        }
+        
+        .bot-status {
+            display: inline-block;
+            padding: 3px 8px;
+            border-radius: 3px;
+            font-size: 12px;
+            margin-left: 10px;
+        }
+        
+        .status-active {
+            background: #d4edda;
+            color: #155724;
+        }
+        
+        .status-inactive {
+            background: #f8d7da;
+            color: #721c24;
+        }
+        
+        .quick-start {
+            background: #f0f4ff;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 30px;
+        }
+        
+        .quick-start h3 {
+            color: #667eea;
+            margin-bottom: 10px;
+        }
+        
+        .quick-start ol {
+            margin-left: 20px;
+        }
+        
+        .quick-start li {
+            margin-bottom: 8px;
+            color: #555;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🤖 Munffett Zoom AI Agent</h1>
+        <p class="subtitle">Control Panel for AI Voice Agents</p>
+        
+        <div id="connectionStatus" class="connection-status status-disconnected">
+            ⚠️ Not connected - Click "Test Connection" to start
+        </div>
+        
+        <div class="quick-start">
+            <h3>📋 Quick Start Guide</h3>
+            <ol>
+                <li>Click "Test Connection" to connect to your backend</li>
+                <li>Select an AI persona (Assistant, Teacher, or Interviewer)</li>
+                <li>Create a Zoom meeting with waiting room enabled</li>
+                <li>Paste your Zoom URL and click "Create Bot"</li>
+                <li>Admit the AI bot from the waiting room</li>
+                <li>Start talking - the AI will respond with voice!</li>
+            </ol>
+        </div>
+
+        <div class="section">
+            <h2>🔌 Connection</h2>
+            <button onclick="testConnection()">Test Connection</button>
+            <button onclick="listBots()">List Active Bots</button>
+        </div>
+
+        <div class="section">
+            <h2>🎭 Create AI Bot</h2>
+            
+            <div class="input-group">
+                <label>Select AI Persona:</label>
+                <div class="persona-selector" id="personaSelector">
+                    <div class="persona-card selected" data-persona="assistant" onclick="selectPersona('assistant')">
+                        <div class="persona-title">🤝 AI Assistant</div>
+                        <div class="persona-desc">Helpful, upbeat, and friendly assistant. Great for general conversations and testing.</div>
+                    </div>
+                    <div class="persona-card" data-persona="teacher" onclick="selectPersona('teacher')">
+                        <div class="persona-title">📚 AI Teacher</div>
+                        <div class="persona-desc">Patient educator who explains concepts clearly with examples and encouragement.</div>
+                    </div>
+                    <div class="persona-card" data-persona="interviewer" onclick="selectPersona('interviewer')">
+                        <div class="persona-title">💼 AI Interviewer</div>
+                        <div class="persona-desc">Professional interviewer for job interviews, asking thoughtful questions.</div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="input-group">
+                <label for="meetingUrl">Zoom Meeting URL:</label>
+                <input type="text" id="meetingUrl" placeholder="https://zoom.us/j/1234567890">
+            </div>
+            
+            <button onclick="createBot()">🚀 Create Bot with Selected Persona</button>
+        </div>
+
+        <div class="section">
+            <h2>🛑 End Bot Session</h2>
+            <div class="input-group">
+                <label for="botId">Bot ID:</label>
+                <input type="text" id="botId" placeholder="Enter bot ID to end">
+            </div>
+            <button onclick="endBot()">End Bot</button>
+        </div>
+
+        <div id="response" class="response" style="display: none;"></div>
+        <div id="botList" class="bot-list" style="display: none;"></div>
+    </div>
+
+    <script>
+        // Backend URL - Already configured for your Railway deployment
+        const BACKEND_URL = 'https://web-production-ed329.up.railway.app';
+        let selectedPersona = 'assistant';
+        let isConnected = false;
+        
+        function updateConnectionStatus(connected) {
+            isConnected = connected;
+            const statusDiv = document.getElementById('connectionStatus');
+            if (connected) {
+                statusDiv.className = 'connection-status status-connected';
+                statusDiv.innerHTML = '✅ Connected to backend';
+            } else {
+                statusDiv.className = 'connection-status status-disconnected';
+                statusDiv.innerHTML = '⚠️ Not connected - Click "Test Connection" to start';
+            }
+        }
+
+        function showResponse(message, type = 'info') {
+            const responseDiv = document.getElementById('response');
+            responseDiv.style.display = 'block';
+            responseDiv.className = `response ${type}`;
+            responseDiv.textContent = typeof message === 'object' ? 
+                JSON.stringify(message, null, 2) : message;
+        }
+
+        function selectPersona(persona) {
+            selectedPersona = persona;
+            document.querySelectorAll('.persona-card').forEach(card => {
+                card.classList.remove('selected');
+            });
+            document.querySelector(`[data-persona="${persona}"]`).classList.add('selected');
+        }
+
+        async function testConnection() {
+            try {
+                showResponse('Testing connection to backend...', 'info');
+                const response = await fetch(`${BACKEND_URL}/api/recall/ping`);
+                const data = await response.json();
+                
+                if (data.ok) {
+                    updateConnectionStatus(true);
+                    showResponse('✅ Connection successful! Backend is running.', 'success');
+                } else {
+                    updateConnectionStatus(false);
+                    showResponse('⚠️ Backend responded but returned an error:\n\n' + JSON.stringify(data, null, 2), 'error');
+                }
+            } catch (error) {
+                updateConnectionStatus(false);
+                showResponse(`❌ Connection failed: ${error.message}\n\nMake sure the backend is running and environment variables are set.`, 'error');
+            }
+        }
+
+        async function createBot() {
+            if (!isConnected) {
+                showResponse('Please test connection first!', 'error');
+                return;
+            }
+
+            const meetingUrl = document.getElementById('meetingUrl').value.trim();
+            if (!meetingUrl) {
+                showResponse('Please enter a Zoom meeting URL!', 'error');
+                return;
+            }
+
+            if (!meetingUrl.includes('zoom.us')) {
+                showResponse('Please enter a valid Zoom URL (e.g., https://zoom.us/j/1234567890)', 'error');
+                return;
+            }
+
+            try {
+                showResponse(`Creating ${selectedPersona} bot for your meeting...`, 'info');
+                const response = await fetch(`${BACKEND_URL}/api/recall/create`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ 
+                        meeting_url: meetingUrl,
+                        persona: selectedPersona
+                    })
+                });
+                
+                const data = await response.json();
+                
+                if (response.ok) {
+                    showResponse(`✅ Bot created successfully!\n\nPersona: ${selectedPersona}\nBot ID: ${data.id}\n\n⏳ The bot will join your meeting shortly.\n📝 Remember to admit it from the waiting room!`, 'success');
+                    if (data.id) {
+                        document.getElementById('botId').value = data.id;
+                    }
+                } else {
+                    showResponse(`❌ Failed to create bot:\n\n${JSON.stringify(data, null, 2)}`, 'error');
+                }
+            } catch (error) {
+                showResponse(`❌ Error: ${error.message}`, 'error');
+            }
+        }
+
+        async function listBots() {
+            if (!isConnected) {
+                showResponse('Please test connection first!', 'error');
+                return;
+            }
+
+            try {
+                showResponse('Fetching active bots...', 'info');
+                const response = await fetch(`${BACKEND_URL}/api/recall/list`);
+                const data = await response.json();
+                
+                if (response.ok) {
+                    const botListDiv = document.getElementById('botList');
+                    
+                    if (Array.isArray(data) && data.length > 0) {
+                        let html = '<h3>Active Bots:</h3>';
+                        data.forEach(bot => {
+                            const status = bot.status || 'unknown';
+                            html += `
+                                <div class="bot-item">
+                                    <div class="bot-info">
+                                        <span class="bot-id">ID: ${bot.id}</span>
+                                        <span class="bot-status status-${status === 'active' ? 'active' : 'inactive'}">${status}</span>
+                                        <div style="font-size: 12px; color: #666; margin-top: 5px;">
+                                            ${bot.meeting_url || 'No meeting URL'}
+                                        </div>
+                                    </div>
+                                    <button onclick="document.getElementById('botId').value='${bot.id}'; endBot()">End Bot</button>
+                                </div>
+                            `;
+                        });
+                        botListDiv.innerHTML = html;
+                        botListDiv.style.display = 'block';
+                        showResponse(`Found ${data.length} bot(s)`, 'success');
+                    } else {
+                        showResponse('No active bots found', 'info');
+                        botListDiv.style.display = 'none';
+                    }
+                } else {
+                    showResponse(`Failed to list bots: ${JSON.stringify(data, null, 2)}`, 'error');
+                }
+            } catch (error) {
+                showResponse(`❌ Error: ${error.message}`, 'error');
+            }
+        }
+
+        async function endBot() {
+            if (!isConnected) {
+                showResponse('Please test connection first!', 'error');
+                return;
+            }
+
+            const botId = document.getElementById('botId').value.trim();
+            if (!botId) {
+                showResponse('Please enter a Bot ID!', 'error');
+                return;
+            }
+
+            try {
+                showResponse('Ending bot session...', 'info');
+                const response = await fetch(`${BACKEND_URL}/api/recall/end/${botId}`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    }
+                });
+                
+                const data = await response.json();
+                
+                if (response.ok) {
+                    showResponse(`✅ Bot ended successfully!`, 'success');
+                    document.getElementById('botId').value = '';
+                    if (document.getElementById('botList').style.display !== 'none') {
+                        setTimeout(listBots, 1000);
+                    }
+                } else {
+                    showResponse(`Failed to end bot: ${JSON.stringify(data, null, 2)}`, 'error');
+                }
+            } catch (error) {
+                showResponse(`❌ Error: ${error.message}`, 'error');
+            }
+        }
+
+        // Auto-test connection on load
+        window.addEventListener('load', () => {
+            setTimeout(testConnection, 500);
+        });
+    </script>
+</body>
+</html>

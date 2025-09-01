@@ -21,6 +21,7 @@ PORT = int(os.getenv("PORT", 8000))
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 RECALL_API_KEY = os.getenv("RECALL_API_KEY")
 PUBLIC_URL = os.getenv("PUBLIC_URL", "")  # Will be set after Railway deployment
+RECALL_REGION = os.getenv("RECALL_REGION", "us-west-2")  # Your Recall region
 
 if not OPENAI_API_KEY:
     raise ValueError("OPENAI_API_KEY must be set in environment variables")
@@ -91,13 +92,17 @@ class RecallAPIClient:
     
     def __init__(self, api_key: str):
         self.api_key = api_key
-        self.base_url = "https://us-west-2.recall.ai/api/v1"
+        # Use the correct region for your Recall.ai account
+        self.base_url = f"https://{RECALL_REGION}.recall.ai/api/v1"
         
     async def create_bot(self, meeting_url: str, bot_name: str = "AI Assistant", 
                         persona_key: str = "assistant") -> Dict[str, Any]:
         """Create a bot in Recall.ai."""
-        # Get the WebSocket URL for this persona
+        # Construct the WebSocket URL properly
         ws_url = f"{PUBLIC_URL.replace('https://', 'wss://').replace('http://', 'ws://')}/ws?persona={persona_key}"
+        
+        # The webpage URL should include the WebSocket URL as a parameter
+        webpage_url = f"{PUBLIC_URL}/agent?wss={ws_url}"
         
         payload = {
             "meeting_url": meeting_url,
@@ -106,11 +111,13 @@ class RecallAPIClient:
                 "camera": {
                     "kind": "webpage",
                     "config": {
-                        "url": f"{PUBLIC_URL}/agent?wss={ws_url}"
+                        "url": webpage_url
                     }
                 }
             }
         }
+        
+        logger.info(f"Creating bot with webpage URL: {webpage_url}")
         
         async with aiohttp.ClientSession() as session:
             async with session.post(
@@ -200,7 +207,10 @@ async def connect_to_openai_with_persona(persona_key: str):
                     "modalities": ["text", "audio"],
                     "voice": "alloy",
                     "turn_detection": {
-                        "type": "server_vad"
+                        "type": "server_vad",
+                        "threshold": 0.5,
+                        "prefix_padding_ms": 300,
+                        "silence_duration_ms": 200
                     }
                 },
             }
@@ -234,43 +244,49 @@ async def websocket_handler(request):
         
         # Send session created to client
         await ws.send_str(json.dumps(session_created))
+        logger.info("Sent session.created to bot client")
         
-        # Relay messages between client and OpenAI
+        # Create tasks for bidirectional message relay
         async def relay_to_openai():
-            async for msg in ws:
-                if msg.type == aiohttp.WSMsgType.TEXT:
-                    try:
-                        event = json.loads(msg.data)
-                        logger.info(f'Relaying "{event.get("type")}" to OpenAI')
-                        await openai_ws.send(msg.data)
-                    except json.JSONDecodeError:
-                        logger.error(f"Invalid JSON from client: {msg.data}")
-                elif msg.type == aiohttp.WSMsgType.ERROR:
-                    logger.error(f'WebSocket error: {ws.exception()}')
-                    break
+            try:
+                async for msg in ws:
+                    if msg.type == aiohttp.WSMsgType.TEXT:
+                        try:
+                            event = json.loads(msg.data)
+                            logger.debug(f'Relaying "{event.get("type")}" to OpenAI')
+                            await openai_ws.send(msg.data)
+                        except json.JSONDecodeError:
+                            logger.error(f"Invalid JSON from client: {msg.data}")
+                    elif msg.type == aiohttp.WSMsgType.ERROR:
+                        logger.error(f'WebSocket error: {ws.exception()}')
+                        break
+            except Exception as e:
+                logger.error(f"Error in relay_to_openai: {e}")
         
         async def relay_from_openai():
-            while True:
-                try:
+            try:
+                while True:
                     message = await openai_ws.recv()
                     event = json.loads(message)
-                    logger.info(f'Relaying "{event.get("type")}" from OpenAI')
+                    logger.debug(f'Relaying "{event.get("type")}" from OpenAI')
                     await ws.send_str(message)
-                except websockets.exceptions.ConnectionClosed:
-                    break
-                except Exception as e:
-                    logger.error(f"Error relaying from OpenAI: {e}")
-                    break
+            except websockets.exceptions.ConnectionClosed:
+                logger.info("OpenAI WebSocket closed")
+            except Exception as e:
+                logger.error(f"Error in relay_from_openai: {e}")
         
         # Run both relay tasks concurrently
         await asyncio.gather(relay_to_openai(), relay_from_openai())
         
     except Exception as e:
         logger.error(f"WebSocket handler error: {e}")
+        if not ws.closed:
+            await ws.send_str(json.dumps({"type": "error", "error": {"message": str(e)}}))
     finally:
         if openai_ws and not openai_ws.closed:
             await openai_ws.close()
-        await ws.close()
+        if not ws.closed:
+            await ws.close()
     
     return ws
 
@@ -352,191 +368,271 @@ async def ping(request):
 
 
 async def serve_agent_html(request):
-    """Serve the agent HTML page."""
-    # Get WebSocket URL from query parameter
-    wss_url = request.query.get('wss', '')
-    
-    html_content = f"""<!DOCTYPE html>
+    """Serve the agent HTML page with embedded WebSocket connection."""
+    html_content = """<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AI Voice Agent</title>
     <style>
-        body {{
+        body {
             margin: 0;
             padding: 0;
             width: 100vw;
             height: 100vh;
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             display: flex;
-            flex-direction: column;
             justify-content: center;
             align-items: center;
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
             color: white;
-        }}
-        .container {{
+        }
+        .container {
             text-align: center;
-            padding: 20px;
-        }}
-        h1 {{
+            padding: 40px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 20px;
+            backdrop-filter: blur(10px);
+        }
+        h1 {
             font-size: 48px;
-            margin-bottom: 10px;
-        }}
-        .status {{
+            margin-bottom: 20px;
+            animation: glow 2s ease-in-out infinite alternate;
+        }
+        @keyframes glow {
+            from { text-shadow: 0 0 10px rgba(255,255,255,0.5); }
+            to { text-shadow: 0 0 20px rgba(255,255,255,0.8); }
+        }
+        .status {
             font-size: 24px;
             margin: 20px 0;
-        }}
-        .listening {{
-            animation: pulse 2s infinite;
-        }}
-        @keyframes pulse {{
-            0% {{ opacity: 1; }}
-            50% {{ opacity: 0.5; }}
-            100% {{ opacity: 1; }}
-        }}
-        #error {{
-            background: rgba(255, 0, 0, 0.2);
+            padding: 15px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 10px;
+        }
+        .listening {
+            animation: pulse 1.5s infinite;
+        }
+        @keyframes pulse {
+            0% { transform: scale(1); opacity: 1; }
+            50% { transform: scale(1.05); opacity: 0.8; }
+            100% { transform: scale(1); opacity: 1; }
+        }
+        .speaking {
+            background: rgba(76, 175, 80, 0.3);
+            animation: pulse 0.5s infinite;
+        }
+        #log {
+            margin-top: 20px;
+            padding: 15px;
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 10px;
+            max-height: 200px;
+            overflow-y: auto;
+            text-align: left;
+            font-family: monospace;
+            font-size: 12px;
+        }
+        .error {
+            background: rgba(255, 0, 0, 0.3);
             padding: 10px;
             border-radius: 5px;
-            margin-top: 20px;
-            display: none;
-        }}
+            margin-top: 10px;
+        }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>🎤 AI Voice Agent</h1>
-        <div class="status">
-            <div id="status-text">Connecting to OpenAI...</div>
-        </div>
-        <div id="error"></div>
+        <div id="status" class="status">Initializing...</div>
+        <div id="log"></div>
     </div>
 
     <script>
-        const wssUrl = '{wss_url}';
+        // Get WebSocket URL from query parameter
+        const params = new URLSearchParams(window.location.search);
+        const wsUrl = params.get('wss');
+        
         let ws = null;
-        let mediaStream = null;
         let audioContext = null;
-        let audioQueue = [];
-        let isPlaying = false;
+        let mediaStream = null;
+        let processor = null;
 
-        function updateStatus(text, isListening = false) {{
-            const statusDiv = document.getElementById('status-text');
+        function log(message) {
+            console.log(message);
+            const logDiv = document.getElementById('log');
+            const entry = document.createElement('div');
+            entry.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+            logDiv.appendChild(entry);
+            logDiv.scrollTop = logDiv.scrollHeight;
+            
+            // Keep only last 10 log entries
+            while (logDiv.children.length > 10) {
+                logDiv.removeChild(logDiv.firstChild);
+            }
+        }
+
+        function updateStatus(text, className = '') {
+            const statusDiv = document.getElementById('status');
             statusDiv.textContent = text;
-            statusDiv.className = isListening ? 'listening' : '';
-        }}
+            statusDiv.className = 'status ' + className;
+        }
 
-        function showError(message) {{
-            const errorDiv = document.getElementById('error');
-            errorDiv.textContent = 'Error: ' + message;
-            errorDiv.style.display = 'block';
-        }}
-
-        async function initializeAudio() {{
-            try {{
-                // Get microphone access
-                mediaStream = await navigator.mediaDevices.getUserMedia({{ audio: true }});
-                audioContext = new (window.AudioContext || window.webkitAudioContext)({{ sampleRate: 24000 }});
+        async function initializeAudio() {
+            try {
+                log('Requesting microphone access...');
                 
-                // Set up audio processing
+                // Get microphone access - this is automatically granted in Recall.ai bots
+                mediaStream = await navigator.mediaDevices.getUserMedia({ 
+                    audio: {
+                        sampleRate: 24000,
+                        echoCancellation: true,
+                        noiseSuppression: true
+                    } 
+                });
+                
+                log('Microphone access granted');
+                
+                // Create audio context for processing
+                audioContext = new (window.AudioContext || window.webkitAudioContext)({ 
+                    sampleRate: 24000 
+                });
+                
                 const source = audioContext.createMediaStreamSource(mediaStream);
-                const processor = audioContext.createScriptProcessor(4096, 1, 1);
+                processor = audioContext.createScriptProcessor(2048, 1, 1);
                 
-                processor.onaudioprocess = (e) => {{
-                    if (ws && ws.readyState === WebSocket.OPEN) {{
+                processor.onaudioprocess = (e) => {
+                    if (ws && ws.readyState === WebSocket.OPEN) {
                         const inputData = e.inputBuffer.getChannelData(0);
-                        // Convert to 16-bit PCM
-                        const pcm16 = new Int16Array(inputData.length);
-                        for (let i = 0; i < inputData.length; i++) {{
-                            pcm16[i] = Math.max(-32768, Math.min(32767, inputData[i] * 32768));
-                        }}
                         
-                        // Send audio to OpenAI
-                        ws.send(JSON.stringify({{
+                        // Convert Float32 to Int16 PCM
+                        const pcm16 = new Int16Array(inputData.length);
+                        for (let i = 0; i < inputData.length; i++) {
+                            const s = Math.max(-1, Math.min(1, inputData[i]));
+                            pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+                        }
+                        
+                        // Convert to base64
+                        const base64 = btoa(String.fromCharCode(...new Uint8Array(pcm16.buffer)));
+                        
+                        // Send audio to OpenAI via our server
+                        ws.send(JSON.stringify({
                             type: 'input_audio_buffer.append',
-                            audio: btoa(String.fromCharCode(...new Uint8Array(pcm16.buffer)))
-                        }}));
-                    }}
-                }};
+                            audio: base64
+                        }));
+                    }
+                };
                 
                 source.connect(processor);
                 processor.connect(audioContext.destination);
                 
-                updateStatus('✅ Audio initialized', true);
+                log('Audio processing initialized');
                 return true;
-            }} catch (error) {{
-                showError('Failed to access microphone: ' + error.message);
+                
+            } catch (error) {
+                log(`Audio error: ${error.message}`);
                 return false;
-            }}
-        }}
+            }
+        }
 
-        async function connectWebSocket() {{
-            if (!wssUrl) {{
-                showError('No WebSocket URL provided');
+        async function connectWebSocket() {
+            if (!wsUrl) {
+                log('ERROR: No WebSocket URL provided');
+                updateStatus('Configuration Error', 'error');
                 return;
-            }}
-
-            try {{
-                updateStatus('Connecting to AI...');
-                ws = new WebSocket(wssUrl);
+            }
+            
+            log(`Connecting to: ${wsUrl}`);
+            updateStatus('Connecting to server...');
+            
+            try {
+                ws = new WebSocket(wsUrl);
                 
-                ws.onopen = async () => {{
-                    console.log('Connected to WebSocket');
-                    updateStatus('Connected! Initializing audio...');
-                    await initializeAudio();
-                    updateStatus('🎤 Listening... Start talking!', true);
-                }};
+                ws.onopen = async () => {
+                    log('Connected to server');
+                    updateStatus('Setting up audio...');
+                };
                 
-                ws.onmessage = (event) => {{
-                    try {{
+                ws.onmessage = async (event) => {
+                    try {
                         const data = JSON.parse(event.data);
-                        console.log('Received:', data.type);
                         
-                        if (data.type === 'response.audio.delta' && data.delta) {{
-                            // Handle audio response from OpenAI
-                            playAudioDelta(data.delta);
-                        }} else if (data.type === 'response.audio_transcript.done') {{
-                            console.log('AI said:', data.transcript);
-                        }} else if (data.type === 'conversation.item.input_audio_transcription.completed') {{
-                            console.log('You said:', data.transcript);
-                        }}
-                    }} catch (error) {{
-                        console.error('Error processing message:', error);
-                    }}
-                }};
+                        switch(data.type) {
+                            case 'session.created':
+                                log('OpenAI session created');
+                                await initializeAudio();
+                                updateStatus('🎤 Listening... Speak now!', 'listening');
+                                break;
+                                
+                            case 'response.audio.delta':
+                                updateStatus('🔊 AI is speaking...', 'speaking');
+                                if (data.delta) {
+                                    playAudioChunk(data.delta);
+                                }
+                                break;
+                                
+                            case 'response.audio.done':
+                                updateStatus('🎤 Listening...', 'listening');
+                                break;
+                                
+                            case 'conversation.item.input_audio_transcription.completed':
+                                if (data.transcript) {
+                                    log(`You: "${data.transcript}"`);
+                                }
+                                break;
+                                
+                            case 'response.audio_transcript.done':
+                                if (data.transcript) {
+                                    log(`AI: "${data.transcript}"`);
+                                }
+                                break;
+                                
+                            case 'error':
+                                log(`Error: ${data.error?.message || 'Unknown error'}`);
+                                updateStatus('Error occurred', 'error');
+                                break;
+                        }
+                    } catch (error) {
+                        log(`Message processing error: ${error.message}`);
+                    }
+                };
                 
-                ws.onerror = (error) => {{
-                    console.error('WebSocket error:', error);
-                    showError('Connection error');
-                }};
+                ws.onerror = (error) => {
+                    log(`WebSocket error: ${error}`);
+                    updateStatus('Connection error', 'error');
+                };
                 
-                ws.onclose = () => {{
-                    console.log('WebSocket closed');
-                    updateStatus('Disconnected. Refreshing...');
-                    setTimeout(() => location.reload(), 3000);
-                }};
-            }} catch (error) {{
-                showError('Failed to connect: ' + error.message);
-            }}
-        }}
+                ws.onclose = () => {
+                    log('Disconnected from server');
+                    updateStatus('Reconnecting...', 'error');
+                    setTimeout(connectWebSocket, 3000);
+                };
+                
+            } catch (error) {
+                log(`Connection error: ${error.message}`);
+                updateStatus('Failed to connect', 'error');
+                setTimeout(connectWebSocket, 5000);
+            }
+        }
 
-        async function playAudioDelta(base64Audio) {{
-            try {{
-                // Decode base64 to PCM16
+        function playAudioChunk(base64Audio) {
+            if (!audioContext) return;
+            
+            try {
+                // Decode base64
                 const binaryString = atob(base64Audio);
                 const bytes = new Uint8Array(binaryString.length);
-                for (let i = 0; i < binaryString.length; i++) {{
+                for (let i = 0; i < binaryString.length; i++) {
                     bytes[i] = binaryString.charCodeAt(i);
-                }}
+                }
                 
-                // Convert to Float32 for Web Audio
+                // Convert to Float32
                 const pcm16 = new Int16Array(bytes.buffer);
                 const float32 = new Float32Array(pcm16.length);
-                for (let i = 0; i < pcm16.length; i++) {{
+                for (let i = 0; i < pcm16.length; i++) {
                     float32[i] = pcm16[i] / 32768;
-                }}
+                }
                 
                 // Create and play audio buffer
                 const audioBuffer = audioContext.createBuffer(1, float32.length, 24000);
@@ -546,17 +642,21 @@ async def serve_agent_html(request):
                 source.buffer = audioBuffer;
                 source.connect(audioContext.destination);
                 source.start();
-            }} catch (error) {{
-                console.error('Error playing audio:', error);
-            }}
-        }}
+                
+            } catch (error) {
+                log(`Audio playback error: ${error.message}`);
+            }
+        }
 
-        // Start connection
+        // Start the connection
+        log('AI Voice Agent starting...');
         connectWebSocket();
     </script>
 </body>
 </html>"""
+    
     return web.Response(text=html_content, content_type='text/html')
+
 
 def create_app():
     """Create the aiohttp application."""
@@ -592,4 +692,6 @@ def create_app():
 if __name__ == '__main__':
     app = create_app()
     logger.info(f"Starting API server on port {PORT}")
+    logger.info(f"Using Recall.ai region: {RECALL_REGION}")
+    logger.info(f"Public URL: {PUBLIC_URL}")
     web.run_app(app, host='0.0.0.0', port=PORT)

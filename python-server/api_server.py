@@ -368,7 +368,7 @@ async def ping(request):
 
 
 async def serve_agent_html(request):
-    """Serve the agent HTML page with embedded WebSocket connection."""
+    """Serve the agent HTML page with proper audio handling."""
     html_content = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -457,7 +457,9 @@ async def serve_agent_html(request):
         let ws = null;
         let audioContext = null;
         let mediaStream = null;
-        let processor = null;
+        let audioWorklet = null;
+        let audioQueue = [];
+        let isPlaying = false;
 
         function log(message) {
             console.log(message);
@@ -479,44 +481,91 @@ async def serve_agent_html(request):
             statusDiv.className = 'status ' + className;
         }
 
+        // Audio worklet processor for capturing microphone input
+        const audioProcessorCode = `
+            class AudioProcessor extends AudioWorkletProcessor {
+                constructor() {
+                    super();
+                    this.bufferSize = 2400; // 100ms at 24kHz
+                    this.buffer = new Float32Array(this.bufferSize);
+                    this.bufferIndex = 0;
+                }
+                
+                process(inputs, outputs, parameters) {
+                    const input = inputs[0];
+                    if (input && input[0]) {
+                        const inputChannel = input[0];
+                        
+                        for (let i = 0; i < inputChannel.length; i++) {
+                            this.buffer[this.bufferIndex++] = inputChannel[i];
+                            
+                            if (this.bufferIndex >= this.bufferSize) {
+                                // Send buffer to main thread
+                                this.port.postMessage({
+                                    type: 'audio',
+                                    buffer: this.buffer.slice()
+                                });
+                                this.bufferIndex = 0;
+                            }
+                        }
+                    }
+                    return true;
+                }
+            }
+            registerProcessor('audio-processor', AudioProcessor);
+        `;
+
         async function initializeAudio() {
             try {
                 log('Requesting microphone access...');
                 
-                // Get microphone access - this is automatically granted in Recall.ai bots
+                // Get microphone access
                 mediaStream = await navigator.mediaDevices.getUserMedia({ 
                     audio: {
                         sampleRate: 24000,
+                        channelCount: 1,
                         echoCancellation: true,
-                        noiseSuppression: true
+                        noiseSuppression: true,
+                        autoGainControl: true
                     } 
                 });
                 
                 log('Microphone access granted');
                 
-                // Create audio context for processing
+                // Create audio context
                 audioContext = new (window.AudioContext || window.webkitAudioContext)({ 
                     sampleRate: 24000 
                 });
                 
-                const source = audioContext.createMediaStreamSource(mediaStream);
-                processor = audioContext.createScriptProcessor(2048, 1, 1);
+                // Create audio worklet for processing
+                const blob = new Blob([audioProcessorCode], { type: 'application/javascript' });
+                const workletUrl = URL.createObjectURL(blob);
+                await audioContext.audioWorklet.addModule(workletUrl);
                 
-                processor.onaudioprocess = (e) => {
-                    if (ws && ws.readyState === WebSocket.OPEN) {
-                        const inputData = e.inputBuffer.getChannelData(0);
+                const source = audioContext.createMediaStreamSource(mediaStream);
+                audioWorklet = new AudioWorkletNode(audioContext, 'audio-processor');
+                
+                // Handle audio data from worklet
+                audioWorklet.port.onmessage = (event) => {
+                    if (event.data.type === 'audio' && ws && ws.readyState === WebSocket.OPEN) {
+                        const float32 = event.data.buffer;
                         
-                        // Convert Float32 to Int16 PCM
-                        const pcm16 = new Int16Array(inputData.length);
-                        for (let i = 0; i < inputData.length; i++) {
-                            const s = Math.max(-1, Math.min(1, inputData[i]));
+                        // Convert to 16-bit PCM
+                        const pcm16 = new Int16Array(float32.length);
+                        for (let i = 0; i < float32.length; i++) {
+                            const s = Math.max(-1, Math.min(1, float32[i]));
                             pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
                         }
                         
                         // Convert to base64
-                        const base64 = btoa(String.fromCharCode(...new Uint8Array(pcm16.buffer)));
+                        const uint8 = new Uint8Array(pcm16.buffer);
+                        let binary = '';
+                        for (let i = 0; i < uint8.byteLength; i++) {
+                            binary += String.fromCharCode(uint8[i]);
+                        }
+                        const base64 = btoa(binary);
                         
-                        // Send audio to OpenAI via our server
+                        // Send to OpenAI
                         ws.send(JSON.stringify({
                             type: 'input_audio_buffer.append',
                             audio: base64
@@ -524,8 +573,8 @@ async def serve_agent_html(request):
                     }
                 };
                 
-                source.connect(processor);
-                processor.connect(audioContext.destination);
+                source.connect(audioWorklet);
+                audioWorklet.connect(audioContext.destination);
                 
                 log('Audio processing initialized');
                 return true;
@@ -536,6 +585,66 @@ async def serve_agent_html(request):
             }
         }
 
+        async function playAudioQueue() {
+            if (isPlaying || audioQueue.length === 0 || !audioContext) return;
+            
+            isPlaying = true;
+            
+            while (audioQueue.length > 0) {
+                const audioData = audioQueue.shift();
+                await playAudioChunk(audioData);
+            }
+            
+            isPlaying = false;
+        }
+
+        function playAudioChunk(base64Audio) {
+            return new Promise((resolve) => {
+                if (!audioContext) {
+                    resolve();
+                    return;
+                }
+                
+                try {
+                    // Decode base64 to binary
+                    const binaryString = atob(base64Audio);
+                    const len = binaryString.length;
+                    const bytes = new Uint8Array(len);
+                    for (let i = 0; i < len; i++) {
+                        bytes[i] = binaryString.charCodeAt(i);
+                    }
+                    
+                    // Interpret as 16-bit PCM
+                    const pcm16 = new Int16Array(bytes.buffer);
+                    
+                    // Convert to Float32 for Web Audio API
+                    const float32 = new Float32Array(pcm16.length);
+                    for (let i = 0; i < pcm16.length; i++) {
+                        float32[i] = pcm16[i] / 32768.0;
+                    }
+                    
+                    // Create audio buffer
+                    const audioBuffer = audioContext.createBuffer(1, float32.length, 24000);
+                    audioBuffer.getChannelData(0).set(float32);
+                    
+                    // Create source and play
+                    const source = audioContext.createBufferSource();
+                    source.buffer = audioBuffer;
+                    source.connect(audioContext.destination);
+                    
+                    source.onended = () => {
+                        resolve();
+                    };
+                    
+                    source.start(0);
+                    
+                } catch (error) {
+                    log(`Audio playback error: ${error.message}`);
+                    resolve();
+                }
+            });
+        }
+
         async function connectWebSocket() {
             if (!wsUrl) {
                 log('ERROR: No WebSocket URL provided');
@@ -543,7 +652,7 @@ async def serve_agent_html(request):
                 return;
             }
             
-            log(`Connecting to: ${wsUrl}`);
+            log(`Connecting to server...`);
             updateStatus('Connecting to server...');
             
             try {
@@ -566,9 +675,10 @@ async def serve_agent_html(request):
                                 break;
                                 
                             case 'response.audio.delta':
-                                updateStatus('🔊 AI is speaking...', 'speaking');
                                 if (data.delta) {
-                                    playAudioChunk(data.delta);
+                                    audioQueue.push(data.delta);
+                                    playAudioQueue();
+                                    updateStatus('🔊 AI is speaking...', 'speaking');
                                 }
                                 break;
                                 
@@ -588,9 +698,20 @@ async def serve_agent_html(request):
                                 }
                                 break;
                                 
+                            case 'session.updated':
+                                log('Session configuration updated');
+                                break;
+                                
                             case 'error':
-                                log(`Error: ${data.error?.message || 'Unknown error'}`);
+                                log(`Error: ${data.error?.message || JSON.stringify(data.error)}`);
                                 updateStatus('Error occurred', 'error');
+                                break;
+                                
+                            default:
+                                // Log other message types for debugging
+                                if (data.type && !data.type.includes('.delta')) {
+                                    console.log('Received:', data.type);
+                                }
                                 break;
                         }
                     } catch (error) {
@@ -613,38 +734,6 @@ async def serve_agent_html(request):
                 log(`Connection error: ${error.message}`);
                 updateStatus('Failed to connect', 'error');
                 setTimeout(connectWebSocket, 5000);
-            }
-        }
-
-        function playAudioChunk(base64Audio) {
-            if (!audioContext) return;
-            
-            try {
-                // Decode base64
-                const binaryString = atob(base64Audio);
-                const bytes = new Uint8Array(binaryString.length);
-                for (let i = 0; i < binaryString.length; i++) {
-                    bytes[i] = binaryString.charCodeAt(i);
-                }
-                
-                // Convert to Float32
-                const pcm16 = new Int16Array(bytes.buffer);
-                const float32 = new Float32Array(pcm16.length);
-                for (let i = 0; i < pcm16.length; i++) {
-                    float32[i] = pcm16[i] / 32768;
-                }
-                
-                // Create and play audio buffer
-                const audioBuffer = audioContext.createBuffer(1, float32.length, 24000);
-                audioBuffer.getChannelData(0).set(float32);
-                
-                const source = audioContext.createBufferSource();
-                source.buffer = audioBuffer;
-                source.connect(audioContext.destination);
-                source.start();
-                
-            } catch (error) {
-                log(`Audio playback error: ${error.message}`);
             }
         }
 
